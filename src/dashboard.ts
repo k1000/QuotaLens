@@ -49,6 +49,11 @@ export const dashboardPage = `<!doctype html>
       .fill.warning { background: var(--warning); }
       .fill.danger { background: var(--danger); }
       .balance { color: #e6e7ec; font-size: .95rem; }
+      .models { border-top: 1px solid var(--border); padding-top: .7rem; }
+      .models summary { color: var(--muted); cursor: pointer; font-size: .85rem; }
+      .models summary:focus-visible { outline: 2px solid white; outline-offset: 3px; }
+      .models ul { display: flex; flex-wrap: wrap; gap: .35rem; margin: .65rem 0 0; padding: 0; list-style: none; }
+      .models li { border-radius: .35rem; padding: .24rem .45rem; color: #dfe1e8; background: #252931; font-size: .8rem; }
       .warning { color: var(--warning); font-size: .85rem; line-height: 1.35; }
       .empty { color: var(--muted); font-size: .9rem; }
     </style>
@@ -142,6 +147,19 @@ export const dashboardPage = `<!doctype html>
         item.append(footer);
         parent.append(item);
       }
+      function renderModels(card, models) {
+        if (!models.length) return;
+        const details = document.createElement("details");
+        details.className = "models";
+        append(details, "summary", models.length + " available models");
+        const list = document.createElement("ul");
+        for (const model of models) {
+          const item = append(list, "li", model.name);
+          item.title = model.id;
+        }
+        details.append(list);
+        card.append(details);
+      }
       function renderSnapshot(card, record) {
         const { provider, snapshot } = record;
         const header = document.createElement("div");
@@ -149,6 +167,7 @@ export const dashboardPage = `<!doctype html>
         append(header, "h2", providerName(provider.id));
         append(header, "span", snapshot.connection, "connection " + snapshot.connection);
         card.append(header);
+        renderModels(card, provider.models);
 
         if (snapshot.quotas?.length) {
           const quotas = document.createElement("div");

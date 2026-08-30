@@ -14,6 +14,7 @@ test("serves the QuotaLens dashboard", async () => {
   expect(page).toContain("QuotaLens");
   expect(page).toContain("Active providers");
   expect(page).toContain("progressbar");
+  expect(page).toContain("available models");
 });
 
 test("lists the live provider registry without credentials", async () => {
