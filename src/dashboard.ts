@@ -198,15 +198,16 @@ export const dashboardPage = `<!doctype html>
               return { provider, snapshot: { connection: "error", quotas: [], warnings: ["Snapshot unavailable."] } };
             }
           }));
-          records.sort((left, right) => (left.snapshot.connection === "connected" ? -1 : 0) - (right.snapshot.connection === "connected" ? -1 : 0));
-          renderActive(records);
-          for (const record of records) {
+          const visibleRecords = records.filter((record) => record.snapshot.connection !== "unsupported");
+          visibleRecords.sort((left, right) => (left.snapshot.connection === "connected" ? -1 : 0) - (right.snapshot.connection === "connected" ? -1 : 0));
+          renderActive(visibleRecords);
+          for (const record of visibleRecords) {
             const card = document.createElement("article");
             card.className = "card";
             renderSnapshot(card, record);
             providersElement.append(card);
           }
-          messageElement.textContent = remoteProviders.length + " remote providers configured.";
+          messageElement.textContent = visibleRecords.length + " provider accounts shown.";
         } catch (error) {
           messageElement.textContent = error instanceof Error ? error.message : "Unable to load providers.";
         } finally {
