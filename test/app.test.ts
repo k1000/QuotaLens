@@ -10,7 +10,10 @@ test("serves the QuotaLens dashboard", async () => {
 
   expect(response.status).toBe(200);
   expect(response.headers.get("content-type")).toContain("text/html");
-  expect(await response.text()).toContain("QuotaLens");
+  const page = await response.text();
+  expect(page).toContain("QuotaLens");
+  expect(page).toContain("Active providers");
+  expect(page).toContain("progressbar");
 });
 
 test("lists the live provider registry without credentials", async () => {
