@@ -1,4 +1,5 @@
 import { SafeCredentialResolver, bearerAuthorizationHeader } from "./credentials.ts";
+import { GroqObservationStore } from "./groq.ts";
 import type { ProviderRuntimeConfig, ProviderSnapshot, QuotaBucket } from "./types.ts";
 
 /**
@@ -16,6 +17,7 @@ type JsonRecord = Record<string, unknown>;
 interface ConnectorOptions {
   fetch?: FetchLike;
   credentials?: SafeCredentialResolver;
+  groqObservations?: GroqObservationStore;
 }
 
 function observedAt(): string {
@@ -323,6 +325,16 @@ export class ZaiQuotaConnector implements ProviderConnector {
   }
 }
 
+export class GroqRateLimitConnector implements ProviderConnector {
+  readonly providerId = "groq";
+
+  constructor(private readonly observations: GroqObservationStore) {}
+
+  async fetchSnapshot(_provider: ProviderRuntimeConfig): Promise<ProviderSnapshot> {
+    return this.observations.snapshot();
+  }
+}
+
 export class ConnectorRegistry {
   private readonly connectors = new Map<string, ProviderConnector>();
 
@@ -357,5 +369,6 @@ export function createDefaultConnectorRegistry(options: ConnectorOptions = {}): 
     new MoonshotBalanceConnector(options),
     new DeepSeekBalanceConnector(options),
     new ZaiQuotaConnector(options),
+    new GroqRateLimitConnector(options.groqObservations ?? new GroqObservationStore()),
   ]);
 }

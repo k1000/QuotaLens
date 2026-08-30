@@ -62,7 +62,7 @@ export interface QuotaBucket {
 export interface ProviderSnapshot {
   providerId: string;
   observedAt: string;
-  connection: "connected" | "unauthorized" | "unsupported" | "error";
+  connection: "connected" | "unauthorized" | "unsupported" | "waiting" | "error";
   subscription?: SubscriptionStatus;
   quotas: QuotaBucket[];
   warnings: string[];

@@ -3,6 +3,9 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "pi": {
+    "extensions": ["./extensions/quotalens-groq.js"]
+  },
   "scripts": {
     "dev": "bun --hot index.ts",
     "start": "bun index.ts",

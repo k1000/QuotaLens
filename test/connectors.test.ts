@@ -7,6 +7,7 @@ import {
   ZaiQuotaConnector,
 } from "../src/connectors.ts";
 import { SafeCredentialResolver, bearerAuthorizationHeader } from "../src/credentials.ts";
+import { GroqObservationStore } from "../src/groq.ts";
 import type { ProviderRuntimeConfig } from "../src/types.ts";
 import { createApp } from "../src/app.ts";
 
@@ -203,6 +204,55 @@ test("Z.AI connector returns experimental array-shaped token and time limits", a
   });
   expect(snapshot.warnings).toContain("Experimental Z.AI quota connector: endpoint source and percentage semantics may change.");
   expect(JSON.stringify(snapshot)).not.toContain("12345");
+});
+
+test("Groq observations retain only rate-limit headroom and reset times", () => {
+  const store = new GroqObservationStore();
+  const observedAt = new Date("2026-09-01T12:00:00.000Z");
+  const snapshot = store.observe({
+    "x-ratelimit-limit-requests": "14400",
+    "x-ratelimit-remaining-requests": "14370",
+    "x-ratelimit-reset-requests": "2m59.56s",
+    "x-ratelimit-limit-tokens": "18000",
+    "x-ratelimit-remaining-tokens": "17997",
+    "x-ratelimit-reset-tokens": "7.66s",
+    authorization: "must-not-be-stored",
+  }, observedAt);
+
+  expect(snapshot).toMatchObject({
+    connection: "connected",
+    quotas: [
+      { id: "groq-requests", used: 30, remaining: 14370, limit: 14400, unit: "requests" },
+      { id: "groq-tokens", used: 3, remaining: 17997, limit: 18000, unit: "tokens" },
+    ],
+  });
+  expect(snapshot.quotas[0]?.resetAt).toBe("2026-09-01T12:02:59.560Z");
+  expect(JSON.stringify(snapshot)).not.toContain("must-not-be-stored");
+});
+
+test("Groq observation API updates the configured provider snapshot", async () => {
+  const store = new GroqObservationStore();
+  const app = createApp({
+    modelsPath: `${import.meta.dir}/connectors.fixture.json`,
+    groqObservations: store,
+  });
+
+  const response = await app.request("/api/observations/groq", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      headers: {
+        "x-ratelimit-limit-requests": "100",
+        "x-ratelimit-remaining-requests": "75",
+      },
+    }),
+  });
+  expect(response.status).toBe(202);
+
+  const snapshotResponse = await app.request("/api/providers/groq/snapshot");
+  expect(await snapshotResponse.json()).toMatchObject({
+    snapshot: { connection: "connected", quotas: [{ id: "groq-requests", remaining: 75 }] },
+  });
 });
 
 test("default app wires Moonshot, DeepSeek, and Z.AI while Alibaba/Qwen remains unsupported", async () => {

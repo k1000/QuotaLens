@@ -2,6 +2,7 @@ import { Hono } from "hono";
 
 import { ConnectorRegistry, createDefaultConnectorRegistry } from "./connectors.ts";
 import { dashboardPage } from "./dashboard.ts";
+import { GroqObservationStore } from "./groq.ts";
 import {
   DEFAULT_MODELS_PATH,
   readProviderRegistry,
@@ -11,17 +12,32 @@ import {
 export interface AppOptions {
   modelsPath?: string;
   connectors?: ConnectorRegistry;
+  groqObservations?: GroqObservationStore;
 }
 
-export function createApp({
-  modelsPath = DEFAULT_MODELS_PATH,
-  connectors = createDefaultConnectorRegistry(),
-}: AppOptions = {}) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function createApp(options: AppOptions = {}) {
+  const modelsPath = options.modelsPath ?? DEFAULT_MODELS_PATH;
+  const groqObservations = options.groqObservations ?? new GroqObservationStore();
+  const connectors = options.connectors ?? createDefaultConnectorRegistry({ groqObservations });
   const app = new Hono();
 
   app.get("/", (c) => c.html(dashboardPage));
 
   app.get("/health", (c) => c.json({ status: "ok" }));
+
+  app.post("/api/observations/groq", async (c) => {
+    const body: unknown = await c.req.json().catch(() => undefined);
+    if (!isRecord(body) || !isRecord(body.headers)) {
+      return c.json({ error: "Groq observation headers are required." }, 400);
+    }
+
+    const snapshot = groqObservations.observe(body.headers);
+    return c.json({ accepted: true, observedAt: snapshot.observedAt }, 202);
+  });
 
   app.get("/api/providers", async (c) => {
     try {

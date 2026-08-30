@@ -18,6 +18,12 @@
       "baseUrl": "https://api.z.ai/api/coding/paas/v4",
       "models": []
     },
+    "groq": {
+      "api": "openai-completions",
+      "apiKey": "$GROQ_API_KEY",
+      "baseUrl": "https://api.groq.com/openai/v1",
+      "models": []
+    },
     "qwen": {
       "api": "openai-completions",
       "apiKey": "qwen-test-key",
