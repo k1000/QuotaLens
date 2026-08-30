@@ -79,7 +79,7 @@ export const dashboardPage = `<!doctype html>
         return element;
       }
       function providerName(id) {
-        return ({ zai: "Z.AI", qwen: "Alibaba / Qwen", moonshot: "Moonshot", deepseek: "DeepSeek" })[id] || id;
+        return ({ zai: "Z.AI", qwen: "Alibaba / Qwen", "kimi-code-api": "Kimi Code", moonshot: "Moonshot", deepseek: "DeepSeek" })[id] || id;
       }
       function isLocal(provider) {
         try {
@@ -154,7 +154,7 @@ export const dashboardPage = `<!doctype html>
           const quotas = document.createElement("div");
           quotas.className = "quota-list";
           for (const quota of snapshot.quotas) {
-            if (quota.unit === "currency") append(quotas, "p", quota.label + ": " + number(quota.remaining || 0), "balance");
+            if (quota.unit === "currency") append(quotas, "p", quota.label + ": " + number(quota.remaining ?? quota.used ?? 0), "balance");
             else renderQuota(quotas, quota);
           }
           card.append(quotas);

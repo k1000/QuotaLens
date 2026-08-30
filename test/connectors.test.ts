@@ -1,7 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 
 import {
+  AlibabaBssBillingConnector,
   createDefaultConnectorRegistry,
+  KimiCodeUsageConnector,
   DeepSeekBalanceConnector,
   MoonshotBalanceConnector,
   ZaiQuotaConnector,
@@ -12,6 +14,8 @@ import type { ProviderRuntimeConfig } from "../src/types.ts";
 import { createApp } from "../src/app.ts";
 
 const originalMoonshotKey = process.env.QUOTALENS_TEST_MOONSHOT_KEY;
+const originalAlibabaBssAccessKeyId = process.env.QUOTALENS_ALIBABA_BSS_ACCESS_KEY_ID;
+const originalAlibabaBssAccessKeySecret = process.env.QUOTALENS_ALIBABA_BSS_ACCESS_KEY_SECRET;
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
@@ -19,6 +23,16 @@ afterEach(() => {
     delete process.env.QUOTALENS_TEST_MOONSHOT_KEY;
   } else {
     process.env.QUOTALENS_TEST_MOONSHOT_KEY = originalMoonshotKey;
+  }
+  if (originalAlibabaBssAccessKeyId === undefined) {
+    delete process.env.QUOTALENS_ALIBABA_BSS_ACCESS_KEY_ID;
+  } else {
+    process.env.QUOTALENS_ALIBABA_BSS_ACCESS_KEY_ID = originalAlibabaBssAccessKeyId;
+  }
+  if (originalAlibabaBssAccessKeySecret === undefined) {
+    delete process.env.QUOTALENS_ALIBABA_BSS_ACCESS_KEY_SECRET;
+  } else {
+    process.env.QUOTALENS_ALIBABA_BSS_ACCESS_KEY_SECRET = originalAlibabaBssAccessKeySecret;
   }
   globalThis.fetch = originalFetch;
 });
@@ -206,6 +220,114 @@ test("Z.AI connector returns experimental array-shaped token and time limits", a
   expect(JSON.stringify(snapshot)).not.toContain("12345");
 });
 
+test("Alibaba BSS connector reports separate delayed billing data for Qwen", async () => {
+  let clientConfig: unknown;
+  let requestedCycle: string | undefined;
+  const connector = new AlibabaBssBillingConnector({
+    alibabaBssAccessKeyId: "bss-access-key-id",
+    alibabaBssAccessKeySecret: "bss-access-key-secret",
+    alibabaBssRegionId: "ap-southeast-1",
+    now: () => new Date("2026-09-14T12:00:00.000Z"),
+    alibabaBssClientFactory: (config) => {
+      clientConfig = config;
+      return {
+        async queryAccountBalance() {
+          return {
+            success: true,
+            data: {
+              currency: "USD",
+              availableAmount: "12.5",
+              availableCashAmount: "10",
+              creditAmount: "2.5",
+            },
+          };
+        },
+        async queryBillOverview(billingCycle) {
+          requestedCycle = billingCycle;
+          return {
+            success: true,
+            data: {
+              billingCycle,
+              items: {
+                item: [
+                  { currency: "USD", afterTaxAmount: 1.25 },
+                  { currency: "USD", afterTaxAmount: 2 },
+                ],
+              },
+            },
+          };
+        },
+      };
+    },
+  });
+
+  const snapshot = await connector.fetchSnapshot({
+    id: "qwen",
+    apiKey: "qwen-api-key-must-not-be-used",
+    models: [],
+  });
+
+  expect(clientConfig).toEqual({
+    accessKeyId: "bss-access-key-id",
+    accessKeySecret: "bss-access-key-secret",
+    regionId: "ap-southeast-1",
+  });
+  expect(requestedCycle).toBe("2026-09");
+  expect(snapshot).toMatchObject({
+    providerId: "qwen",
+    connection: "connected",
+    quotas: [
+      { id: "alibaba-bss-usd-available-balance", remaining: 12.5, unit: "currency" },
+      { id: "alibaba-bss-usd-available-cash", remaining: 10, unit: "currency" },
+      { id: "alibaba-bss-usd-credit-balance", remaining: 2.5, unit: "currency" },
+      { id: "alibaba-bss-usd-billed-2026-09", used: 3.25, unit: "currency", policy: "billing-cycle" },
+    ],
+  });
+  expect(snapshot.warnings).toContain("Alibaba Cloud BSS data is delayed billing data, not Qwen Token Plan quota or reset windows.");
+  expect(JSON.stringify(snapshot)).not.toContain("qwen-api-key-must-not-be-used");
+  expect(JSON.stringify(snapshot)).not.toContain("bss-access-key-secret");
+});
+
+test("Kimi Code connector normalizes direct weekly and rolling quotas", async () => {
+  const connector = new KimiCodeUsageConnector({
+    fetch: jsonFetch("https://api.kimi.com/coding/v1/usages", {
+      usage: {
+        limit: "100",
+        remaining: "75",
+        resetTime: "2026-09-08T12:00:00.000Z",
+      },
+      limits: [
+        {
+          window: { duration: 300, timeUnit: "TIME_UNIT_MINUTE" },
+          detail: {
+            limit: "100",
+            remaining: "80",
+            resetTime: "2026-09-01T17:00:00.000Z",
+          },
+        },
+      ],
+    }),
+  });
+
+  const snapshot = await connector.fetchSnapshot({
+    id: "kimi-code-api",
+    apiKey: "test-key",
+    baseUrl: "https://api.kimi.com/coding/v1",
+    models: [],
+  });
+
+  expect(snapshot).toMatchObject({
+    providerId: "kimi-code-api",
+    connection: "connected",
+    quotas: [
+      { id: "kimi-code-weekly", used: 25, remaining: 75, limit: 100, window: "7d", resetAt: "2026-09-08T12:00:00.000Z" },
+      { id: "kimi-code-rolling-0", used: 20, remaining: 80, limit: 100, window: "5h", resetAt: "2026-09-01T17:00:00.000Z", policy: "rolling" },
+    ],
+  });
+  expect(snapshot.warnings).toContain("Experimental Kimi Code quota connector: endpoint is not in the published account API reference.");
+  expect(JSON.stringify(snapshot)).not.toContain("test-key");
+});
+
 test("Groq observations retain only rate-limit headroom and reset times", () => {
   const store = new GroqObservationStore();
   const observedAt = new Date("2026-09-01T12:00:00.000Z");
@@ -255,8 +377,10 @@ test("Groq observation API updates the configured provider snapshot", async () =
   });
 });
 
-test("default app wires Moonshot, DeepSeek, and Z.AI while Alibaba/Qwen remains unsupported", async () => {
+test("default app uses the configured Kimi Code credential while Alibaba BSS stays optional", async () => {
   process.env.QUOTALENS_TEST_MOONSHOT_KEY = "test-key";
+  delete process.env.QUOTALENS_ALIBABA_BSS_ACCESS_KEY_ID;
+  delete process.env.QUOTALENS_ALIBABA_BSS_ACCESS_KEY_SECRET;
   const fixturePath = `${import.meta.dir}/connectors.fixture.json`;
   const calls: string[] = [];
 
@@ -266,6 +390,7 @@ test("default app wires Moonshot, DeepSeek, and Z.AI while Alibaba/Qwen remains 
     if (url.includes("moonshot")) return Response.json({ data: { available_balance: 1 } });
     if (url.includes("deepseek")) return Response.json({ is_available: true, balance_infos: [{ currency: "CNY", total_balance: 2 }] });
     if (url.includes("z.ai")) return Response.json({ data: { limits: [{ type: "TOKENS_LIMIT", unit: 3, percentage: 80, nextResetTime: 1796083200000 }] } });
+    if (url.includes("api.kimi.com")) return Response.json({ usage: { limit: 100, remaining: 90, resetTime: "2026-09-08T12:00:00.000Z" }, limits: [] });
     throw new Error("unexpected fetch");
   }) as typeof fetch;
 
@@ -275,6 +400,7 @@ test("default app wires Moonshot, DeepSeek, and Z.AI while Alibaba/Qwen remains 
   const deepseek = await (await app.request("/api/providers/deepseek/snapshot")).json() as { snapshot: unknown };
   const zai = await (await app.request("/api/providers/zai/snapshot")).json() as { snapshot: unknown };
   const qwen = await (await app.request("/api/providers/qwen/snapshot")).json() as { snapshot: unknown };
+  const kimi = await (await app.request("/api/providers/kimi-code-api/snapshot")).json() as { snapshot: unknown };
 
   expect(moonshot.snapshot).toMatchObject({
     connection: "connected",
@@ -293,10 +419,16 @@ test("default app wires Moonshot, DeepSeek, and Z.AI while Alibaba/Qwen remains 
     connection: "unsupported",
     quotas: [],
   });
+  expect(kimi.snapshot).toMatchObject({
+    providerId: "kimi-code-api",
+    connection: "connected",
+    quotas: [{ id: "kimi-code-weekly", remaining: 90, limit: 100 }],
+  });
 
   expect(calls).toEqual([
     "https://api.moonshot.ai/v1/users/me/balance",
     "https://api.deepseek.com/user/balance",
     "https://api.z.ai/api/monitor/usage/quota/limit",
+    "https://api.kimi.com/coding/v1/usages",
   ]);
 });

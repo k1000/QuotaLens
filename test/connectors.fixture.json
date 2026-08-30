@@ -29,6 +29,12 @@
       "apiKey": "qwen-test-key",
       "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "models": []
+    },
+    "kimi-code-api": {
+      "api": "openai-completions",
+      "apiKey": "kimi-test-key",
+      "baseUrl": "https://api.kimi.com/coding/v1",
+      "models": []
     }
   }
 }

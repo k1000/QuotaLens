@@ -1,3 +1,6 @@
+import AlibabaBssOpenApiClient, { QueryBillOverviewRequest } from "@alicloud/bssopenapi20171214";
+import { $OpenApiUtil } from "@alicloud/openapi-core";
+
 import { SafeCredentialResolver, bearerAuthorizationHeader } from "./credentials.ts";
 import { GroqObservationStore } from "./groq.ts";
 import type { ProviderRuntimeConfig, ProviderSnapshot, QuotaBucket } from "./types.ts";
@@ -14,10 +17,28 @@ export interface ProviderConnector {
 type FetchLike = typeof fetch;
 type JsonRecord = Record<string, unknown>;
 
+interface AlibabaBssClient {
+  queryAccountBalance(): Promise<unknown>;
+  queryBillOverview(billingCycle: string): Promise<unknown>;
+}
+
+interface AlibabaBssClientConfig {
+  accessKeyId: string;
+  accessKeySecret: string;
+  regionId: string;
+}
+
+type AlibabaBssClientFactory = (config: AlibabaBssClientConfig) => AlibabaBssClient;
+
 interface ConnectorOptions {
   fetch?: FetchLike;
   credentials?: SafeCredentialResolver;
   groqObservations?: GroqObservationStore;
+  alibabaBssAccessKeyId?: string;
+  alibabaBssAccessKeySecret?: string;
+  alibabaBssRegionId?: string;
+  alibabaBssClientFactory?: AlibabaBssClientFactory;
+  now?: () => Date;
 }
 
 function observedAt(): string {
@@ -325,6 +346,260 @@ export class ZaiQuotaConnector implements ProviderConnector {
   }
 }
 
+function defaultAlibabaBssClient(config: AlibabaBssClientConfig): AlibabaBssClient {
+  const client = new AlibabaBssOpenApiClient(new $OpenApiUtil.Config(config));
+  return {
+    async queryAccountBalance() {
+      return (await client.queryAccountBalance()).body;
+    },
+    async queryBillOverview(billingCycle: string) {
+      return (await client.queryBillOverview(new QueryBillOverviewRequest({ billingCycle }))).body;
+    },
+  };
+}
+
+function bssBalanceBuckets(value: unknown): QuotaBucket[] {
+  const root = isRecord(value) ? value : {};
+  const data = isRecord(root.data) ? root.data : {};
+  const currency = asString(data.currency) ?? "account";
+  const currencyId = currency.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+  return [
+    moneyBucket(
+      `alibaba-bss-${currencyId}-available-balance`,
+      `Alibaba Cloud ${currency} available balance`,
+      asFiniteNumber(data.availableAmount),
+    ),
+    moneyBucket(
+      `alibaba-bss-${currencyId}-available-cash`,
+      `Alibaba Cloud ${currency} available cash`,
+      asFiniteNumber(data.availableCashAmount),
+    ),
+    moneyBucket(
+      `alibaba-bss-${currencyId}-credit-balance`,
+      `Alibaba Cloud ${currency} credit balance`,
+      asFiniteNumber(data.creditAmount),
+    ),
+  ].filter((bucket): bucket is QuotaBucket => bucket !== undefined);
+}
+
+function bssBillBuckets(value: unknown): QuotaBucket[] {
+  const root = isRecord(value) ? value : {};
+  const data = isRecord(root.data) ? root.data : {};
+  const billingCycle = asString(data.billingCycle) ?? "current cycle";
+  const itemContainer = isRecord(data.items) ? data.items : {};
+  const items = Array.isArray(itemContainer.item) ? itemContainer.item : [];
+  const amounts = new Map<string, number>();
+
+  for (const item of items) {
+    if (!isRecord(item)) continue;
+    const amount = asFiniteNumber(item.afterTaxAmount);
+    if (amount === undefined) continue;
+    const currency = asString(item.currency) ?? asString(item.paymentCurrency) ?? "account";
+    amounts.set(currency, (amounts.get(currency) ?? 0) + amount);
+  }
+
+  return [...amounts.entries()].map(([currency, used]) => ({
+    id: `alibaba-bss-${currency.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-billed-${billingCycle}`,
+    label: `Alibaba Cloud ${currency} billed (${billingCycle}, delayed)`,
+    unit: "currency" as const,
+    used,
+    policy: "billing-cycle" as const,
+    confidence: "estimated" as const,
+  }));
+}
+
+function bssRequestError(action: string, reason: unknown): string {
+  const detail = reason instanceof Error && reason.message ? `: ${reason.message}` : ".";
+  return `Alibaba Cloud BSS ${action} request failed${detail}`;
+}
+
+function bssResponseError(action: string, value: unknown): string | undefined {
+  if (!isRecord(value)) return `Alibaba Cloud BSS ${action} returned an invalid response.`;
+  if (value.success !== false) return undefined;
+  return `Alibaba Cloud BSS ${action} was rejected${asString(value.message) ? `: ${asString(value.message)}` : "."}`;
+}
+
+/**
+ * Reads delayed Alibaba Cloud billing data for Qwen only when independent BSS
+ * credentials are configured. It does not query or infer Qwen Token Plan quotas.
+ */
+export class AlibabaBssBillingConnector implements ProviderConnector {
+  readonly providerId = "qwen";
+  private readonly credentials: SafeCredentialResolver;
+  private readonly accessKeyIdReference: string | undefined;
+  private readonly accessKeySecretReference: string | undefined;
+  private readonly regionId: string;
+  private readonly clientFactory: AlibabaBssClientFactory;
+  private readonly now: () => Date;
+
+  constructor(options: ConnectorOptions = {}) {
+    this.credentials = options.credentials ?? new SafeCredentialResolver();
+    this.accessKeyIdReference = options.alibabaBssAccessKeyId ?? process.env.QUOTALENS_ALIBABA_BSS_ACCESS_KEY_ID;
+    this.accessKeySecretReference = options.alibabaBssAccessKeySecret ?? process.env.QUOTALENS_ALIBABA_BSS_ACCESS_KEY_SECRET;
+    this.regionId = options.alibabaBssRegionId ?? process.env.QUOTALENS_ALIBABA_BSS_REGION ?? "ap-southeast-1";
+    this.clientFactory = options.alibabaBssClientFactory ?? defaultAlibabaBssClient;
+    this.now = options.now ?? (() => new Date());
+  }
+
+  async fetchSnapshot(provider: ProviderRuntimeConfig): Promise<ProviderSnapshot> {
+    const [accessKeyId, accessKeySecret] = await Promise.all([
+      this.credentials.resolve(this.accessKeyIdReference),
+      this.credentials.resolve(this.accessKeySecretReference),
+    ]);
+    if (!accessKeyId.value || !accessKeySecret.value) {
+      return errorSnapshot(
+        provider.id,
+        "unsupported",
+        "Alibaba Cloud BSS billing is optional and not configured. Set separate BSS AccessKey credentials; a Qwen API key cannot be used.",
+      );
+    }
+
+    let client: AlibabaBssClient;
+    try {
+      client = this.clientFactory({
+        accessKeyId: accessKeyId.value,
+        accessKeySecret: accessKeySecret.value,
+        regionId: this.regionId,
+      });
+    } catch (error) {
+      return errorSnapshot(provider.id, "error", bssRequestError("client initialization", error));
+    }
+
+    const billingCycle = this.now().toISOString().slice(0, 7);
+    const [balanceResult, billResult] = await Promise.allSettled([
+      client.queryAccountBalance(),
+      client.queryBillOverview(billingCycle),
+    ]);
+    const warnings = [
+      "Alibaba Cloud BSS data is delayed billing data, not Qwen Token Plan quota or reset windows.",
+    ];
+    const quotas: QuotaBucket[] = [];
+
+    if (balanceResult.status === "fulfilled") {
+      const responseError = bssResponseError("QueryAccountBalance", balanceResult.value);
+      if (responseError) {
+        warnings.push(responseError);
+      } else {
+        const balanceBuckets = bssBalanceBuckets(balanceResult.value);
+        quotas.push(...balanceBuckets);
+        if (!balanceBuckets.length) {
+          warnings.push("Alibaba Cloud BSS balance response did not contain recognized balance fields.");
+        }
+      }
+    } else {
+      warnings.push(bssRequestError("QueryAccountBalance", balanceResult.reason));
+    }
+
+    if (billResult.status === "fulfilled") {
+      const responseError = bssResponseError("QueryBillOverview", billResult.value);
+      if (responseError) {
+        warnings.push(responseError);
+      } else {
+        const billBuckets = bssBillBuckets(billResult.value);
+        quotas.push(...billBuckets);
+        if (!billBuckets.length) {
+          warnings.push("Alibaba Cloud BSS bill overview did not contain recognized billed amounts.");
+        }
+      }
+    } else {
+      warnings.push(bssRequestError("QueryBillOverview", billResult.reason));
+    }
+
+    return {
+      providerId: provider.id,
+      observedAt: observedAt(),
+      connection: quotas.length ? "connected" : "error",
+      quotas,
+      warnings,
+    };
+  }
+}
+
+function kimiQuotaBucket(
+  id: string,
+  label: string,
+  source: unknown,
+  policy: QuotaBucket["policy"],
+  window: string,
+): QuotaBucket | undefined {
+  if (!isRecord(source)) return undefined;
+  const limit = asFiniteNumber(source.limit);
+  const remaining = asFiniteNumber(source.remaining);
+  if (limit === undefined || remaining === undefined) return undefined;
+
+  return {
+    id,
+    label,
+    unit: "requests",
+    used: Math.max(0, limit - remaining),
+    remaining: Math.max(0, remaining),
+    limit,
+    policy,
+    window,
+    resetAt: asString(source.resetTime),
+    confidence: "exact",
+  };
+}
+
+function kimiRollingQuota(entry: unknown, index: number): QuotaBucket | undefined {
+  if (!isRecord(entry) || !isRecord(entry.window)) return undefined;
+  const duration = asFiniteNumber(entry.window.duration);
+  const timeUnit = asString(entry.window.timeUnit);
+  const window = duration === 300 && timeUnit === "TIME_UNIT_MINUTE"
+    ? "5h"
+    : duration !== undefined && timeUnit ? `${duration} ${timeUnit.replace("TIME_UNIT_", "").toLowerCase()}` : "rolling";
+
+  return kimiQuotaBucket(
+    `kimi-code-rolling-${index}`,
+    window === "5h" ? "5-hour window" : "Rolling window",
+    entry.detail,
+    "rolling",
+    window,
+  );
+}
+
+/** Reads Kimi Code membership quota from the configured Pi credential. */
+export class KimiCodeUsageConnector implements ProviderConnector {
+  readonly providerId = "kimi-code-api";
+  private readonly fetchImpl: FetchLike;
+  private readonly credentials: SafeCredentialResolver;
+
+  constructor(options: ConnectorOptions = {}) {
+    this.fetchImpl = options.fetch ?? fetch;
+    this.credentials = options.credentials ?? new SafeCredentialResolver();
+  }
+
+  async fetchSnapshot(provider: ProviderRuntimeConfig): Promise<ProviderSnapshot> {
+    const result = await fetchAccountJson(
+      "Kimi Code",
+      provider,
+      officialUrl(provider, "https://api.kimi.com/coding", "/coding/v1/usages"),
+      this.fetchImpl,
+      this.credentials,
+    );
+    if ("providerId" in result) return result;
+
+    const root = isRecord(result.json) ? result.json : {};
+    const quotas = [
+      kimiQuotaBucket("kimi-code-weekly", "Weekly quota", root.usage, "fixed-window", "7d"),
+      ...(Array.isArray(root.limits)
+        ? root.limits.map(kimiRollingQuota).filter((bucket): bucket is QuotaBucket => bucket !== undefined)
+        : []),
+    ].filter((bucket): bucket is QuotaBucket => bucket !== undefined);
+
+    return {
+      providerId: provider.id,
+      observedAt: observedAt(),
+      connection: "connected",
+      quotas,
+      warnings: quotas.length
+        ? ["Experimental Kimi Code quota connector: endpoint is not in the published account API reference."]
+        : ["Kimi Code quota response did not contain recognized quota fields."],
+    };
+  }
+}
+
 export class GroqRateLimitConnector implements ProviderConnector {
   readonly providerId = "groq";
 
@@ -369,6 +644,8 @@ export function createDefaultConnectorRegistry(options: ConnectorOptions = {}): 
     new MoonshotBalanceConnector(options),
     new DeepSeekBalanceConnector(options),
     new ZaiQuotaConnector(options),
+    new AlibabaBssBillingConnector(options),
+    new KimiCodeUsageConnector(options),
     new GroqRateLimitConnector(options.groqObservations ?? new GroqObservationStore()),
   ]);
 }
