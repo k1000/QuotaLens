@@ -1,0 +1,20 @@
+{
+  "providers": {
+    "example": {
+      "api": "openai-completions",
+      "apiKey": "must-not-leave-the-backend",
+      "baseUrl": "https://api.example.test/v1",
+      "headers": {
+        "authorization": "must-not-leave-the-backend"
+      },
+      "models": [
+        {
+          "id": "example-chat",
+          "name": "Example Chat",
+          "contextWindow": 128000,
+          "maxTokens": 8192
+        }
+      ]
+    }
+  }
+}
