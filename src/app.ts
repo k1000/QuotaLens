@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 
-import { ConnectorRegistry } from "./connectors.ts";
+import { ConnectorRegistry, createDefaultConnectorRegistry } from "./connectors.ts";
 import { dashboardPage } from "./dashboard.ts";
 import {
   DEFAULT_MODELS_PATH,
@@ -15,7 +15,7 @@ export interface AppOptions {
 
 export function createApp({
   modelsPath = DEFAULT_MODELS_PATH,
-  connectors = new ConnectorRegistry(),
+  connectors = createDefaultConnectorRegistry(),
 }: AppOptions = {}) {
   const app = new Hono();
 

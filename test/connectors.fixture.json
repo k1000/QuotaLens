@@ -1,0 +1,28 @@
+{
+  "providers": {
+    "moonshot": {
+      "api": "openai-completions",
+      "apiKey": "$QUOTALENS_TEST_MOONSHOT_KEY",
+      "baseUrl": "https://api.moonshot.ai/v1",
+      "models": []
+    },
+    "deepseek": {
+      "api": "openai-completions",
+      "apiKey": "deepseek-test-key",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "models": []
+    },
+    "zai": {
+      "api": "openai-completions",
+      "apiKey": "zai-test-key",
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "models": []
+    },
+    "qwen": {
+      "api": "openai-completions",
+      "apiKey": "qwen-test-key",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "models": []
+    }
+  }
+}

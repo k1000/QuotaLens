@@ -9,7 +9,9 @@ export type QuotaUnit =
   | "requests"
   | "messages"
   | "credits"
-  | "currency";
+  | "currency"
+  | "percent"
+  | "time";
 
 export interface ModelDefinition {
   id: string;
@@ -48,6 +50,7 @@ export interface QuotaBucket {
   label: string;
   modelIds?: string[];
   unit: QuotaUnit;
+  used?: number;
   remaining?: number;
   limit?: number;
   policy: QuotaPolicy;
